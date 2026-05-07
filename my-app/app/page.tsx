@@ -5,7 +5,7 @@ import WindTurbineScene from "./components/WindTurbineModel";
 
 export default function WindTurbineDashboard() {
   const [angle, setAngle] = useState(0);
-  const espIP = "192.168.68.113"; // Tavo ESP32 IP
+  const espIP = "192.168.68.113";
 
   const sendAngleToESP = async (value: number) => {
     try {
