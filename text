@@ -1,0 +1,124 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <AccelStepper.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <Wire.h>
+#include <HTTPClient.h> // Required for sending data to InfluxDB
+#include <WiFiClientSecure.h>
+const char *ssid = "Cgates-7F00";
+const char *password = "Cgates-5CA67F00";
+
+WebServer server(80);
+
+// --- INFLUXDB SETUP ---
+const char *INFLUXDB_URL = "https://eu-central-1-1.aws.cloud2.influxdata.com/";
+const char *INFLUXDB_ORG = "BBD";
+const char *INFLUXDB_BUCKET = "turbine_data";
+const char *INFLUXDB_TOKEN = "S00vfLTsHtpgVh7NsHnJSdjBDxy8SZcEkewHpwnB99sbbqTI-jAST2K45xzno8nCxHqrv2b8vWGmYKmdfv4zbw==";
+
+unsigned long lastInfluxUpdate = 0; // Timer for non-blocking uploads
+
+// --- STEPPER MOTOR SETUP ---
+#define MotorInterfaceType AccelStepper::HALF4WIRE
+#define motorPin1 19 // IN1
+#define motorPin2 18 // IN2
+#define motorPin3 5  // IN3
+#define motorPin4 21 // IN4
+AccelStepper myStepper(MotorInterfaceType, motorPin1, motorPin3, motorPin2, motorPin4);
+const int STEPS_PER_REVOLUTION = 4096;
+
+// --- VIBRATION SENSOR SETUP ---
+Adafruit_MPU6050 mpu;
+
+void enableCORS()
+{
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.sendHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  // --- CLOUD UPLOAD FUNCTION ---
+  // --- CLOUD UPLOAD FUNCTION ---
+  void sendToInflux(float accelX, float accelY, float accelZ)
+  {
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      WiFiClientSecure client;
+      client.setInsecure(); // This is the magic line! Skips heavy SSL checks to save memory.
+
+      HTTPClient http;
+
+      // Build the specific InfluxDB API URL
+      String serverPath = String(INFLUXDB_URL) + "/api/v2/write?org=" + String(INFLUXDB_ORG) + "&bucket=" + String(INFLUXDB_BUCKET) + "&precision=s";
+
+      // Notice we pass 'client' into the begin() function now
+      http.begin(client, serverPath);
+      http.addHeader("Authorization", "Token " + String(INFLUXDB_TOKEN));
+      http.addHeader("Content-Type", "text/plain");
+
+      // InfluxDB Line Protocol Format
+      String httpRequestData = "vibration,node=esp32 accelX=" + String(accelX) + ",accelY=" + String(accelY) + ",accelZ=" + String(accelZ);
+
+      int httpResponseCode = http.POST(httpRequestData);
+
+      if (httpResponseCode == 204)
+      {
+        Serial.println("Success! Data written to InfluxDB.");
+      }
+      else
+      {
+        Serial.print("InfluxDB Error Code: ");
+        Serial.println(httpResponseCode);
+      }
+      http.end();
+    }
+    else
+    {
+      Serial.println("Wi-Fi Disconnected. Cannot send to Influx.");
+    }
+  }
+
+  void setup()
+  {
+    Serial.begin(115200);
+
+    // Configure Stepper
+    myStepper.setMaxSpeed(1000.0);
+    myStepper.setAcceleration(500.0);
+
+    // Configure I2C specifically for pins 26 and 27
+    // 1. Motor Management
+    if (myStepper.distanceToGo() != 0)
+    {
+      myStepper.run();
+    }
+    else
+    {
+      // Motor has reached its destination. SLEEP to save power.
+      myStepper.disableOutputs();
+    }
+
+    // 2. InfluxDB Background Upload (Every 1 second)
+    if (millis() - lastInfluxUpdate > 1000)
+    {
+      lastInfluxUpdate = millis();
+
+      // Read the sensor
+      sensors_event_t a, g, temp;
+      mpu.getEvent(&a, &g, &temp);
+
+      float ax = a.acceleration.x;
+      float ay = a.acceleration.y;
+      float az = a.acceleration.z;
+
+      // The "Bouncer": Apply Ghost Data filter so you don't send garbage to the database
+      if (abs(ax) > 30.0 abs(ay) > 30.0 abs(az) > 40.0)
+      {
+        ax = 0.0;
+        ay = 0.0;
+        az = 9.81;
+      }
+
+      // Fire it to the cloud
+      sendToInflux(ax, ay, az);
+    }
+  }
